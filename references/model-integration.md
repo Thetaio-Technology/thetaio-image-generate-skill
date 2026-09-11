@@ -66,6 +66,23 @@ export THETAIO_MODEL="gpt-image-2"
 
 画幅比例(3:4、1:1、16:9 等)不在 `--size` 里设置,请在提示词中明确描述比例与用途。`--size` 只决定分辨率档位。
 
+## 请求方式(同步 / 异步)
+
+生图脚本支持两种请求方式,用 `--mode` 控制,默认 `auto`:
+
+| 值 | 行为 |
+| --- | --- |
+| `auto`(默认) | 按请求大小自动选: 参考图 ≥ 2 张、参考图总体积 ≥ 4MB、`--n > 1` 或 `--size 4K` 时走异步,否则走同步 |
+| `sync` | 强制同步: 一次请求等到出图(30~180 秒),期间连接必须保持 |
+| `async` | 强制异步: 提交后立刻返回任务号,脚本轮询到完成再取图 |
+
+对照:
+
+- 同步接口: `POST /images/generations`、`POST /images/edits`
+- 异步接口: `POST /images/generations/async`、`POST /images/edits/async`,结果用 `GET /images/tasks/{task_id}` 轮询
+
+同步适合小请求(单张、小图);异步更适合参考图多、体积大、4K、多张输出——长等待不占用连接,抗网络抖动更好。`auto` 已覆盖这些经验规则,通常无需手动指定。
+
 ## 单张生图
 
 文生图:
@@ -97,9 +114,20 @@ python <技能目录>/scripts/generate_image.py \
   --output "<输出目录>/raw/01.png"
 ```
 
+多参考图(默认 auto 会自动走异步,也可显式强制):
+
+```bash
+python <技能目录>/scripts/generate_image.py \
+  --prompt "<提示词>" \
+  --image "<参考图1>" --image "<参考图2>" --image "<参考图3>" \
+  --output "<输出目录>/raw/01.png" \
+  --size 2K \
+  --mode async
+```
+
 ## 批量生图
 
-优先使用 `scripts/batch_generate.py`:
+优先使用 `scripts/batch_generate.py`(默认 `--mode auto`,同样可按需传 `sync`/`async`):
 
 ```bash
 python <技能目录>/scripts/batch_generate.py \

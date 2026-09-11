@@ -18,6 +18,7 @@ import json
 import os
 import pathlib
 import sys
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -29,6 +30,16 @@ DEFAULT_SIZE = "2K"
 NO_API_KEY_MARKER = "[NO_API_KEY]"
 SUPPORTED_SIZES = ("1K", "2K", "4K")
 DEFAULT_TIMEOUT_SECONDS = 180
+MODE_SYNC = "sync"
+MODE_ASYNC = "async"
+MODE_AUTO = "auto"
+DEFAULT_MODE = MODE_AUTO
+SUPPORTED_MODES = (MODE_AUTO, MODE_SYNC, MODE_ASYNC)
+# auto 模式下判定为“重请求”的阈值: 多个参考图 / 总字节数偏大 / 多张输出 / 4K。
+AUTO_ASYNC_IMAGE_COUNT = 2
+AUTO_ASYNC_TOTAL_BYTES = 4 * 1024 * 1024
+ASYNC_POLL_INTERVAL_SECONDS = 4
+ASYNC_MAX_WAIT_SECONDS = 900
 CONFIG_CANDIDATES = ("config.local", "config")
 ENV_BASE_URL_KEYS = ("THETAIO_BASE_URL", "IMAGE_BASE_URL")
 ENV_API_KEY_KEYS = ("THETAIO_API_KEY", "IMAGE_API_KEY", "OPENAI_API_KEY")
@@ -100,7 +111,7 @@ def normalize_size(size: str) -> str:
     return cleaned
 
 
-def build_edit_request(base_url, payload, images, mask):
+def build_multipart_body(payload, images, mask):
     boundary = f"----ThetaIO{uuid.uuid4().hex}"
     chunks = []
     for name, value in payload.items():
@@ -127,15 +138,10 @@ def build_edit_request(base_url, payload, images, mask):
             b"\r\n",
         ])
     chunks.append(f"--{boundary}--\r\n".encode())
-    return f"{base_url}/images/edits", b"".join(chunks), f"multipart/form-data; boundary={boundary}"
+    return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
 
 
-def request_image(prompt, model, size, quality, n, response_format, images, mask, config_path):
-    base_url, api_key, config_model = load_runtime_config(config_path)
-    model_id = model or config_model
-    if not model_id:
-        raise RuntimeError("未指定模型; 请通过 --model 或配置中的 model 提供")
-
+def build_payload(model_id, prompt, size, quality, n, response_format):
     payload = {
         "model": model_id,
         "prompt": prompt,
@@ -145,16 +151,44 @@ def request_image(prompt, model, size, quality, n, response_format, images, mask
     }
     if quality:
         payload["quality"] = quality
+    return payload
 
+
+def should_use_async(mode, images, mask, n, size):
+    """auto 模式: 参考图多、请求体大、多张输出或 4K 时改走异步,其余走同步。"""
+    if mode == MODE_SYNC:
+        return False
+    if mode == MODE_ASYNC:
+        return True
+    # auto
+    image_count = len(images or []) + (1 if mask else 0)
+    if image_count >= AUTO_ASYNC_IMAGE_COUNT:
+        return True
+    total_bytes = 0
+    for path in (images or []):
+        try:
+            total_bytes += pathlib.Path(path).stat().st_size
+        except OSError:
+            pass
+    if total_bytes >= AUTO_ASYNC_TOTAL_BYTES:
+        return True
+    if n and n > 1:
+        return True
+    if normalize_size(size) == "4K":
+        return True
+    return False
+
+
+def build_request_once(base_url, api_key, payload, images, mask, endpoint_path):
+    """构造一次 POST 请求; images 非空时走 multipart 编辑,否则走 JSON 生成。"""
+    url = f"{base_url}{endpoint_path}"
     if images:
-        endpoint, body, content_type = build_edit_request(base_url, payload, images, mask)
+        body, content_type = build_multipart_body(payload, images, mask)
     else:
-        endpoint = f"{base_url}/images/generations"
         body = json.dumps(payload).encode("utf-8")
         content_type = "application/json"
-
-    request = urllib.request.Request(
-        endpoint,
+    return urllib.request.Request(
+        url,
         data=body,
         headers={
             "Authorization": f"Bearer {api_key}",
@@ -163,9 +197,12 @@ def request_image(prompt, model, size, quality, n, response_format, images, mask
         },
         method="POST",
     )
+
+
+def _http_json(request, timeout):
     try:
-        with urllib.request.urlopen(request, timeout=DEFAULT_TIMEOUT_SECONDS) as response:
-            return json.loads(response.read().decode("utf-8")), model_id
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
         try:
@@ -175,6 +212,66 @@ def request_image(prompt, model, size, quality, n, response_format, images, mask
         raise RuntimeError(f"ThetaIO HTTP {error.code}: {detail}") from error
     except urllib.error.URLError as error:
         raise RuntimeError(f"ThetaIO 连接失败: {error.reason}") from error
+
+
+def request_image_sync(base_url, api_key, payload, images, mask):
+    endpoint_path = "/images/edits" if images else "/images/generations"
+    request = build_request_once(base_url, api_key, payload, images, mask, endpoint_path)
+    return _http_json(request, DEFAULT_TIMEOUT_SECONDS)
+
+
+def request_image_async(base_url, api_key, payload, images, mask):
+    """提交异步任务并轮询到完成,返回与同步接口同形的结果 (含 data[].url)。"""
+    submit_path = "/images/edits/async" if images else "/images/generations/async"
+    request = build_request_once(base_url, api_key, payload, images, mask, submit_path)
+    submitted = _http_json(request, DEFAULT_TIMEOUT_SECONDS)
+
+    task_id = submitted.get("task_id") or submitted.get("id")
+    poll_url = submitted.get("poll_url") or (f"/images/tasks/{task_id}" if task_id else "")
+    if not task_id and not poll_url:
+        raise RuntimeError(f"ThetaIO 异步提交失败: {json.dumps(submitted, ensure_ascii=False)[:300]}")
+    if poll_url.startswith("/v1"):
+        poll_url = poll_url[len("/v1"):]
+    if not poll_url:
+        raise RuntimeError("ThetaIO 异步提交未返回可轮询的任务地址")
+
+    deadline = time.time() + ASYNC_MAX_WAIT_SECONDS
+    while time.time() < deadline:
+        time.sleep(ASYNC_POLL_INTERVAL_SECONDS)
+        poll_request = urllib.request.Request(
+            f"{base_url}{poll_url}",
+            headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+            method="GET",
+        )
+        task = _http_json(poll_request, 60)
+        status = task.get("status")
+        if status == "processing":
+            continue
+        if status == "completed":
+            result = task.get("result")
+            if isinstance(result, dict) and result.get("data"):
+                return result
+            raise RuntimeError(f"ThetaIO 异步完成但无图片数据: {json.dumps(task, ensure_ascii=False)[:300]}")
+        error = task.get("error") or {}
+        message = error.get("message") if isinstance(error, dict) else str(error)
+        raise RuntimeError(f"ThetaIO 异步任务失败 (http={task.get('http_status')}): {message or status}")
+    raise RuntimeError(f"ThetaIO 异步任务超时未完成 (task_id={task_id})")
+
+
+def request_image(prompt, model, size, quality, n, response_format, images, mask,
+                  config_path, mode=DEFAULT_MODE, verbose=True):
+    base_url, api_key, config_model = load_runtime_config(config_path)
+    model_id = model or config_model
+    if not model_id:
+        raise RuntimeError("未指定模型; 请通过 --model 或配置中的 model 提供")
+
+    payload = build_payload(model_id, prompt, size, quality, n, response_format)
+    use_async = should_use_async(mode, images, mask, n, size)
+    if verbose:
+        print(f"请求方式: {'异步 (提交后轮询)' if use_async else '同步'}")
+    if use_async:
+        return request_image_async(base_url, api_key, payload, images, mask), model_id
+    return request_image_sync(base_url, api_key, payload, images, mask), model_id
 
 
 def save_result(result, output, response_format):
@@ -210,6 +307,7 @@ def generate_image(
     n: int = 1,
     response_format: str = "b64_json",
     config_path: str | None = None,
+    mode: str = DEFAULT_MODE,
     verbose: bool = True,
 ) -> pathlib.Path:
     """生成或编辑图片并返回输出路径,供脚本和批量任务复用。"""
@@ -221,12 +319,13 @@ def generate_image(
     image_paths = [str(path) for path in images] if images else None
 
     if verbose:
-        mode = "图生图" if image_paths else "文生图"
-        print(f"模式: {mode}")
+        kind = "图生图" if image_paths else "文生图"
+        print(f"模式: {kind}")
         print(f"尺寸: {normalize_size(size)}")
 
     result, model_id = request_image(
-        prompt_text, model, size, quality, n, response_format, image_paths, mask, config_path
+        prompt_text, model, size, quality, n, response_format, image_paths, mask,
+        config_path, mode=mode, verbose=verbose,
     )
     output_path = save_result(result, output, response_format)
     if verbose:
@@ -246,6 +345,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n", type=int, default=1, help="生成数量,默认 1")
     parser.add_argument("--response-format", choices=("url", "b64_json"), default="b64_json")
     parser.add_argument("--config", help="可选 scripts/config.local 路径")
+    parser.add_argument(
+        "--mode", choices=SUPPORTED_MODES, default=DEFAULT_MODE,
+        help="请求方式: auto(默认,按请求大小自动选)、sync(同步等待)、async(异步提交后轮询)",
+    )
     parser.add_argument("--quiet", action="store_true", help="减少日志输出")
     return parser.parse_args()
 
@@ -265,12 +368,14 @@ def main() -> int:
                 n=args.n,
                 response_format=args.response_format,
                 config_path=args.config,
+                mode=args.mode,
                 verbose=not args.quiet,
             )
         else:
             result, model_id = request_image(
                 args.prompt, args.model, args.size, args.quality, args.n,
                 args.response_format, args.image, args.mask, args.config,
+                mode=args.mode, verbose=not args.quiet,
             )
             urls = [item["url"] for item in result.get("data", []) if item.get("url")]
             if urls:
