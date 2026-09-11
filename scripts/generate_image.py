@@ -26,6 +26,7 @@ import uuid
 DEFAULT_BASE_URL = "https://api.thetaio.tech/v1"
 DEFAULT_MODEL = "gpt-image-2"
 DEFAULT_SIZE = "2K"
+NO_API_KEY_MARKER = "[NO_API_KEY]"
 SUPPORTED_MODELS = ("gpt-image-2", "gpt-image-2.5")
 SUPPORTED_SIZES = ("1K", "2K", "4K")
 DEFAULT_TIMEOUT_SECONDS = 180
@@ -84,8 +85,8 @@ def load_runtime_config(config_path: str | None = None) -> tuple[str, str, str]:
 
     if not api_key:
         raise RuntimeError(
-            "未找到 ThetaIO API Key。请设置 THETAIO_API_KEY, "
-            "或在 scripts/config.local 中写入 api_key。"
+            f"{NO_API_KEY_MARKER} 未找到 ThetaIO API Key。运行 scripts/setup.py 配置, "
+            "或联系 ThetaIO 开通。"
         )
 
     return base_url.rstrip("/"), api_key, model

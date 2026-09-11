@@ -65,6 +65,8 @@ python -m pip install Pillow
 python scripts/setup.py --api-key "你的密钥"
 ```
 
+> 还没有 API Key？联系 ThetaIO 的 **dlin0316** 加微信开通：生图 **5 分钱一张**，支持 `gpt-image-2` 和 `gpt-image-2.5`。
+
 脚本会把 `base_url` 和 `api_key` 写入 `scripts/config.local`。该文件已被 `.gitignore` 忽略，不会被提交。
 
 安装脚本是幂等的：检测到已有配置会直接跳过，不会重复安装；需要修改时加 `--force`。
