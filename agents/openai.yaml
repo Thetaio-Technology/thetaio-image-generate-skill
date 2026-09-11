@@ -1,0 +1,4 @@
+interface:
+  display_name: "ThetaIO 图片生成器"
+  short_description: "通过 ThetaIO 网关按中文视觉需求生成、编辑、批量处理并按需压缩图片"
+  default_prompt: "使用 $thetaio-image-generation 根据我的视觉需求、参考图和风格要求生成图片；如果我要求发布包或压缩,请再生成压缩图。默认 2K 输出。"

@@ -1,0 +1,5 @@
+# 如果不方便设置环境变量,复制本文件为 scripts/config.local。
+# 不要把真实 API 密钥提交到技能文件中。
+base_url: https://api.thetaio.tech/v1
+api_key:
+model: gpt-image-2
