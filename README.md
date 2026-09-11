@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/hero.webp" alt="ThetaIO 图片生成器 Skill" width="100%">
+</p>
+
 # ThetaIO 图片生成器 Skill
 
 一个接入 [ThetaIO](https://api.thetaio.tech) 中转站的通用图片生成 Skill。把「视觉需求 → 风格判断 → 提示词 → 生图 → 批量一致性 → 按需压缩」整理成一套可复用流程，适合接入 Codex、Claude、OpenClaw 或其他能读取 `SKILL.md` 的 agent。
