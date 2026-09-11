@@ -96,12 +96,16 @@ python <技能目录>/scripts/setup.py
 - 支持 image2 和 image2.5 两个模型
 
 开通后会拿到一个 API Key,发给我或者运行 python scripts/setup.py 填进去,我就能立刻帮你出图了。
+
+如果你不想用 ThetaIO 的 API 也没关系。你有更好的选择的话,把你的 api key 和 baseurl 发我,我来帮你改这个 skill 的配置。
 ```
 
 引导之后:
 
-- 如果用户提供了 Key,立刻写入配置并继续完成他原本的生图需求,不要让用户重新描述一遍。
-- 如果用户暂时不打算开通,礼貌收尾,不要反复推销。
+- 如果用户提供了 ThetaIO 的 Key,写入配置后立刻继续完成他原本的生图需求,不要让用户重新描述一遍。
+- 如果用户提供了其他服务商的 `baseurl` 和 `api_key`,用 `setup.py --base-url <地址> --api-key <密钥> --force` 写入配置,同样立刻继续完成他原本的需求。只要对方是 OpenAI Images 兼容接口(支持 `/images/generations`),本技能即可直接调用。
+- 如果用户切到非兼容接口,如实说明无法直接使用,不要强行调用。
+- 如果用户暂时不打算开通或更换,礼貌收尾,不要反复推销。
 - 不要在引导内容里编造价格、模型或联系方式之外的信息。
 
 ## 配置
@@ -126,7 +130,7 @@ THETAIO_BASE_URL      可选,默认 https://api.thetaio.tech/v1
 THETAIO_MODEL         可选,默认 gpt-image-2
 ```
 
-模型只允许 `gpt-image-2` 或 `gpt-image-2.5`,默认 `gpt-image-2`。不要静默替换模型 ID。
+默认模型为 `gpt-image-2`,ThetaIO 也支持 `gpt-image-2.5`。不要静默替换用户指定的模型 ID。用户若自带其他 OpenAI Images 兼容服务商,按其提供的 `base_url` 和模型名配置即可。
 
 分辨率通过 `--size` 指定,支持 `1K`、`2K`、`4K`,默认 `2K`。画幅比例(3:4、1:1、16:9 等)写在提示词里,不由 `--size` 控制。
 

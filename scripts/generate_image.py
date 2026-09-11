@@ -27,7 +27,6 @@ DEFAULT_BASE_URL = "https://api.thetaio.tech/v1"
 DEFAULT_MODEL = "gpt-image-2"
 DEFAULT_SIZE = "2K"
 NO_API_KEY_MARKER = "[NO_API_KEY]"
-SUPPORTED_MODELS = ("gpt-image-2", "gpt-image-2.5")
 SUPPORTED_SIZES = ("1K", "2K", "4K")
 DEFAULT_TIMEOUT_SECONDS = 180
 CONFIG_CANDIDATES = ("config.local", "config")
@@ -134,8 +133,8 @@ def build_edit_request(base_url, payload, images, mask):
 def request_image(prompt, model, size, quality, n, response_format, images, mask, config_path):
     base_url, api_key, config_model = load_runtime_config(config_path)
     model_id = model or config_model
-    if model_id not in SUPPORTED_MODELS:
-        raise RuntimeError(f"不支持的模型: {model_id}; 仅支持 {', '.join(SUPPORTED_MODELS)}")
+    if not model_id:
+        raise RuntimeError("未指定模型; 请通过 --model 或配置中的 model 提供")
 
     payload = {
         "model": model_id,
@@ -241,7 +240,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", help="输出图片路径; 不传时打印返回的图片 URL")
     parser.add_argument("--image", action="append", help="参考图路径; 可重复传入,传入后走图生图")
     parser.add_argument("--mask", help="可选透明 PNG 蒙版,用于局部编辑")
-    parser.add_argument("--model", choices=SUPPORTED_MODELS, help=f"模型,默认 {DEFAULT_MODEL}")
+    parser.add_argument("--model", help=f"模型,默认 {DEFAULT_MODEL}; ThetaIO 支持 gpt-image-2 与 gpt-image-2.5,其他兼容服务商可传对应模型名")
     parser.add_argument("--size", default=DEFAULT_SIZE, help="尺寸: 1K、2K、4K,默认 2K")
     parser.add_argument("--quality", help="可选质量参数,透传给网关")
     parser.add_argument("--n", type=int, default=1, help="生成数量,默认 1")

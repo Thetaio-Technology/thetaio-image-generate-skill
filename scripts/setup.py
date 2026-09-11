@@ -30,7 +30,6 @@ CONFIG_PATH = SCRIPT_DIR / "config.local"
 CONFIG_CANDIDATES = (SCRIPT_DIR / "config.local", SCRIPT_DIR / "config")
 DEFAULT_BASE_URL = "https://api.thetaio.tech/v1"
 DEFAULT_MODEL = "gpt-image-2"
-SUPPORTED_MODELS = ("gpt-image-2", "gpt-image-2.5")
 
 
 def load_key_value_config(path: pathlib.Path) -> dict[str, str]:
@@ -82,7 +81,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="ThetaIO 图片生成器安装与配置脚本")
     parser.add_argument("--base-url", help=f"ThetaIO 网关地址,默认 {DEFAULT_BASE_URL}")
     parser.add_argument("--api-key", help="ThetaIO API Key")
-    parser.add_argument("--model", choices=SUPPORTED_MODELS, help=f"默认模型,默认 {DEFAULT_MODEL}")
+    parser.add_argument("--model", help=f"默认模型,默认 {DEFAULT_MODEL}; ThetaIO 用 gpt-image-2 或 gpt-image-2.5,其他服务商填对应模型名")
     parser.add_argument("--force", action="store_true", help="已有配置时强制覆盖")
     return parser.parse_args()
 
@@ -118,9 +117,6 @@ def main() -> int:
         return 1
     if not api_key.strip():
         print("错误: api_key 不能为空", file=sys.stderr)
-        return 1
-    if model not in SUPPORTED_MODELS:
-        print(f"错误: model 必须是 {', '.join(SUPPORTED_MODELS)}", file=sys.stderr)
         return 1
 
     path = write_config(base_url, api_key.strip(), model)

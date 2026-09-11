@@ -39,7 +39,7 @@ python -m pip install Pillow
 
 ## 模型配置
 
-本技能只通过 ThetaIO 网关调用,可选模型:
+默认通过 ThetaIO 网关调用,常用模型:
 
 - `gpt-image-2`(默认)
 - `gpt-image-2.5`
@@ -51,6 +51,8 @@ export THETAIO_API_KEY="你的密钥"
 export THETAIO_BASE_URL="https://api.thetaio.tech/v1"
 export THETAIO_MODEL="gpt-image-2"
 ```
+
+用户若自带其他 OpenAI Images 兼容服务商,把 `base_url` 和 `model` 换成对方的即可;只要接口支持 `/images/generations`,本技能可直接调用。不要主动替用户切换服务商。
 
 ## 尺寸
 
@@ -136,7 +138,7 @@ python <技能目录>/scripts/compress_image.py \
 可选字段:
 
 - `size`: 默认 `2K`,可选 `1K`、`2K`、`4K`
-- `model`: 可选 `gpt-image-2` 或 `gpt-image-2.5`
+- `model`: 可选,默认 `gpt-image-2`;可用 `gpt-image-2`、`gpt-image-2.5`,或自带服务商对应的模型名
 - `ref`: 参考图路径; 存在时走图生图
 - `negative_prompt`: 会追加到提示词末尾,因为多数 OpenAI 兼容图片接口不支持单独的负向参数
 
