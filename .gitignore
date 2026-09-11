@@ -15,3 +15,6 @@ output/
 raw/
 compressed/
 batch_result.json
+
+# demo 原始大图(只提交压缩后的 assets/samples)
+demo/

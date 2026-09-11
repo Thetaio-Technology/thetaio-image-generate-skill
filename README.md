@@ -19,6 +19,23 @@
 - **多模型**：支持 `gpt-image-2`（默认）和 `gpt-image-2.5`。
 - **中文可用**：文档、CLI 帮助和错误提示都面向中文用户。
 
+## 生图 Demo
+
+以下均为本技能调用 `gpt-image-2` 生成：
+
+<table>
+  <tr>
+    <td width="33%"><img src="assets/samples/01-portrait.webp" alt="人像"></td>
+    <td width="33%"><img src="assets/samples/02-fashion.webp" alt="电商"></td>
+    <td width="33%"><img src="assets/samples/03-wedding.webp" alt="婚纱"></td>
+  </tr>
+  <tr>
+    <td width="33%"><img src="assets/samples/04-poster.webp" alt="海报"></td>
+    <td width="33%"><img src="assets/samples/05-wuxia.webp" alt="国风"></td>
+    <td width="33%"><img src="assets/samples/06-studio.webp" alt="写真"></td>
+  </tr>
+</table>
+
 ## 目录结构
 
 ```text
@@ -28,6 +45,7 @@ thetaio-image-generation/
   LICENSE
   requirements.txt            # 仅压缩功能需要 Pillow
   agents/openai.yaml          # agent 接口定义
+  assets/                     # 首页 banner 与 demo 示例图
   references/                 # 风格库与控制文档
     general-styles.md
     xiaohongshu-styles.md
