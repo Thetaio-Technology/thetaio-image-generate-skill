@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import io
 import json
 import os
 import pathlib
@@ -46,6 +47,11 @@ AUTO_ASYNC_IMAGE_COUNT = 2
 AUTO_ASYNC_TOTAL_BYTES = 4 * 1024 * 1024
 ASYNC_POLL_INTERVAL_SECONDS = 4
 ASYNC_MAX_WAIT_SECONDS = 900
+# 上传前自动压缩参考图: 单张超过该字节数就压缩,避免超大参考图把网关内存打爆。
+# 网关侧会把整个请求体放大到内存里处理, 单请求体积过大会在并发时 OOM。
+AUTO_COMPRESS_BYTES = 4 * 1024 * 1024
+# 自动压缩时的 JPEG 质量(只去 alpha、不缩分辨率,画质几乎无损)。
+AUTO_COMPRESS_QUALITY = 90
 CONFIG_CANDIDATES = ("config.local", "config")
 ENV_BASE_URL_KEYS = ("THETAIO_BASE_URL", "IMAGE_BASE_URL")
 ENV_API_KEY_KEYS = ("THETAIO_API_KEY", "IMAGE_API_KEY", "OPENAI_API_KEY")
@@ -117,7 +123,66 @@ def normalize_size(size: str) -> str:
     return cleaned
 
 
-def build_multipart_body(payload, images, mask):
+def _load_pillow():
+    """延迟导入 Pillow；未安装时返回 None,由调用方降级为不压缩。"""
+    try:
+        from PIL import Image, ImageOps  # noqa: PLC0415
+    except ImportError:
+        return None
+    return Image, ImageOps
+
+
+def _compress_image_bytes(raw: bytes, filename: str, mime_type: str) -> tuple[bytes, str, str] | None:
+    """把参考图去 alpha 后转 JPEG(保留原分辨率),返回 (bytes, filename, mime_type)。
+
+    失败(没有 Pillow、解码失败等)时返回 None,由调用方回退为原图。
+    """
+    pillow = _load_pillow()
+    if pillow is None:
+        return None
+    image_module, image_ops = pillow
+    try:
+        with image_module.open(io.BytesIO(raw)) as image:
+            prepared = image_ops.exif_transpose(image)
+            if prepared.mode in {"RGBA", "LA"} or (prepared.mode == "P" and "transparency" in prepared.info):
+                background = image_module.new("RGB", prepared.size, (255, 255, 255))
+                background.paste(prepared.convert("RGBA"), mask=prepared.getchannel("A"))
+                prepared = background
+            else:
+                prepared = prepared.convert("RGB")
+            buffer = io.BytesIO()
+            prepared.save(buffer, "JPEG", quality=AUTO_COMPRESS_QUALITY, optimize=True, subsampling=0)
+    except Exception:  # noqa: BLE001 - 压缩失败不应阻断生图,回退原图
+        return None
+    stem = pathlib.Path(filename).stem or "image"
+    return buffer.getvalue(), f"{stem}.jpg", "image/jpeg"
+
+
+def _read_reference_image(path, auto_compress=True) -> tuple[bytes, str, str]:
+    """读取一张参考图; 超过阈值就压缩后再上传,避免单请求体积过大。
+
+    返回 (bytes, filename, mime_type)。压缩失败时按原图返回。
+    """
+    file_path = pathlib.Path(path)
+    if not file_path.is_file():
+        raise RuntimeError(f"文件不存在: {file_path}")
+    raw = file_path.read_bytes()
+    original_mime = "image/png" if file_path.suffix.lower() == ".png" else "image/jpeg"
+    if not auto_compress or len(raw) <= AUTO_COMPRESS_BYTES:
+        return raw, file_path.name, original_mime
+
+    compressed = _compress_image_bytes(raw, file_path.name, original_mime)
+    if compressed is None:
+        return raw, file_path.name, original_mime
+    data, filename, mime_type = compressed
+    print(
+        f"  [压缩] {file_path.name} {len(raw) / 1048576:.1f}MB -> "
+        f"{len(data) / 1048576:.1f}MB (JPEG q{AUTO_COMPRESS_QUALITY})"
+    )
+    return data, filename, mime_type
+
+
+def build_multipart_body(payload, images, mask, auto_compress=True):
     boundary = f"----ThetaIO{uuid.uuid4().hex}"
     chunks = []
     for name, value in payload.items():
@@ -132,15 +197,12 @@ def build_multipart_body(payload, images, mask):
     if mask:
         files.append(("mask", mask))
     for name, path in files:
-        file_path = pathlib.Path(path)
-        if not file_path.is_file():
-            raise RuntimeError(f"文件不存在: {file_path}")
-        content_type = "image/png" if file_path.suffix.lower() == ".png" else "image/jpeg"
+        data, filename, mime_type = _read_reference_image(path, auto_compress=auto_compress)
         chunks.extend([
             f"--{boundary}\r\n".encode(),
-            f'Content-Disposition: form-data; name="{name}"; filename="{file_path.name}"\r\n'.encode(),
-            f"Content-Type: {content_type}\r\n\r\n".encode(),
-            file_path.read_bytes(),
+            f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'.encode(),
+            f"Content-Type: {mime_type}\r\n\r\n".encode(),
+            data,
             b"\r\n",
         ])
     chunks.append(f"--{boundary}--\r\n".encode())
@@ -160,7 +222,7 @@ def build_payload(model_id, prompt, size, quality, n, response_format):
     return payload
 
 
-def should_use_async(mode, images, mask, n, size):
+def should_use_async(mode, images, mask, n, size, auto_compress=True):
     """auto 模式: 参考图多、请求体大、多张输出或 4K 时改走异步,其余走同步。"""
     if mode == MODE_SYNC:
         return False
@@ -173,9 +235,13 @@ def should_use_async(mode, images, mask, n, size):
     total_bytes = 0
     for path in (images or []):
         try:
-            total_bytes += pathlib.Path(path).stat().st_size
+            size_bytes = pathlib.Path(path).stat().st_size
         except OSError:
-            pass
+            continue
+        # 开启自动压缩时,大图会被压到远小于原体积,这里按压缩后的估算量计入。
+        if auto_compress and size_bytes > AUTO_COMPRESS_BYTES:
+            size_bytes = AUTO_COMPRESS_BYTES
+        total_bytes += size_bytes
     if total_bytes >= AUTO_ASYNC_TOTAL_BYTES:
         return True
     if n and n > 1:
@@ -185,11 +251,11 @@ def should_use_async(mode, images, mask, n, size):
     return False
 
 
-def build_request_once(base_url, api_key, payload, images, mask, endpoint_path):
+def build_request_once(base_url, api_key, payload, images, mask, endpoint_path, auto_compress=True):
     """构造一次 POST 请求; images 非空时走 multipart 编辑,否则走 JSON 生成。"""
     url = f"{base_url}{endpoint_path}"
     if images:
-        body, content_type = build_multipart_body(payload, images, mask)
+        body, content_type = build_multipart_body(payload, images, mask, auto_compress=auto_compress)
     else:
         body = json.dumps(payload).encode("utf-8")
         content_type = "application/json"
@@ -220,16 +286,16 @@ def _http_json(request, timeout):
         raise RuntimeError(f"ThetaIO 连接失败: {error.reason}") from error
 
 
-def request_image_sync(base_url, api_key, payload, images, mask):
+def request_image_sync(base_url, api_key, payload, images, mask, auto_compress=True):
     endpoint_path = "/images/edits" if images else "/images/generations"
-    request = build_request_once(base_url, api_key, payload, images, mask, endpoint_path)
+    request = build_request_once(base_url, api_key, payload, images, mask, endpoint_path, auto_compress=auto_compress)
     return _http_json(request, DEFAULT_TIMEOUT_SECONDS)
 
 
-def request_image_async(base_url, api_key, payload, images, mask):
+def request_image_async(base_url, api_key, payload, images, mask, auto_compress=True):
     """提交异步任务并轮询到完成,返回与同步接口同形的结果 (含 data[].url)。"""
     submit_path = "/images/edits/async" if images else "/images/generations/async"
-    request = build_request_once(base_url, api_key, payload, images, mask, submit_path)
+    request = build_request_once(base_url, api_key, payload, images, mask, submit_path, auto_compress=auto_compress)
     submitted = _http_json(request, DEFAULT_TIMEOUT_SECONDS)
 
     task_id = submitted.get("task_id") or submitted.get("id")
@@ -265,19 +331,19 @@ def request_image_async(base_url, api_key, payload, images, mask):
 
 
 def request_image(prompt, model, size, quality, n, response_format, images, mask,
-                  config_path, mode=DEFAULT_MODE, verbose=True):
+                  config_path, mode=DEFAULT_MODE, verbose=True, auto_compress=True):
     base_url, api_key, config_model = load_runtime_config(config_path)
     model_id = model or config_model
     if not model_id:
         raise RuntimeError("未指定模型; 请通过 --model 或配置中的 model 提供")
 
     payload = build_payload(model_id, prompt, size, quality, n, response_format)
-    use_async = should_use_async(mode, images, mask, n, size)
+    use_async = should_use_async(mode, images, mask, n, size, auto_compress=auto_compress)
     if verbose:
         print(f"请求方式: {'异步 (提交后轮询)' if use_async else '同步'}")
     if use_async:
-        return request_image_async(base_url, api_key, payload, images, mask), model_id
-    return request_image_sync(base_url, api_key, payload, images, mask), model_id
+        return request_image_async(base_url, api_key, payload, images, mask, auto_compress=auto_compress), model_id
+    return request_image_sync(base_url, api_key, payload, images, mask, auto_compress=auto_compress), model_id
 
 
 def save_result(result, output, response_format):
@@ -314,9 +380,14 @@ def generate_image(
     response_format: str = "b64_json",
     config_path: str | None = None,
     mode: str = DEFAULT_MODE,
+    auto_compress: bool = True,
     verbose: bool = True,
 ) -> pathlib.Path:
-    """生成或编辑图片并返回输出路径,供脚本和批量任务复用。"""
+    """生成或编辑图片并返回输出路径,供脚本和批量任务复用。
+
+    auto_compress=True 时, 超过阈值的参考图会在上传前自动转成 JPEG(保留原分辨率),
+    显著缩小请求体, 避免并发时把网关内存打爆。
+    """
     prompt_text = prompt.strip()
     if not prompt_text:
         raise RuntimeError("prompt 不能为空")
@@ -338,7 +409,7 @@ def generate_image(
 
     result, model_id = request_image(
         prompt_text, model, size, quality, n, response_format, image_paths, mask,
-        config_path, mode=mode, verbose=verbose,
+        config_path, mode=mode, verbose=verbose, auto_compress=auto_compress,
     )
     output_path = save_result(result, output, response_format)
     if verbose:
@@ -362,6 +433,10 @@ def parse_args() -> argparse.Namespace:
         "--mode", choices=SUPPORTED_MODES, default=DEFAULT_MODE,
         help="请求方式: auto(默认,按请求大小自动选)、sync(同步等待)、async(异步提交后轮询)",
     )
+    parser.add_argument(
+        "--no-compress", action="store_true",
+        help=f"关闭上传前自动压缩(默认开启): 超过 {AUTO_COMPRESS_BYTES // 1048576}MB 的参考图会转为 JPEG q{AUTO_COMPRESS_QUALITY} 再上传",
+    )
     parser.add_argument("--quiet", action="store_true", help="减少日志输出")
     return parser.parse_args()
 
@@ -382,13 +457,14 @@ def main() -> int:
                 response_format=args.response_format,
                 config_path=args.config,
                 mode=args.mode,
+                auto_compress=not args.no_compress,
                 verbose=not args.quiet,
             )
         else:
             result, model_id = request_image(
                 args.prompt, args.model, args.size, args.quality, args.n,
                 args.response_format, args.image, args.mask, args.config,
-                mode=args.mode, verbose=not args.quiet,
+                mode=args.mode, verbose=not args.quiet, auto_compress=not args.no_compress,
             )
             urls = [item["url"] for item in result.get("data", []) if item.get("url")]
             if urls:

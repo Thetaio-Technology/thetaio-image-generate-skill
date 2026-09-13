@@ -158,7 +158,7 @@ def validate_refs(stage2: list[tuple[int, dict[str, Any]]]) -> None:
 
 def run_single_task(
     task: dict[str, Any], task_index: int, total: int, config_path: str | None,
-    request_mode: str = DEFAULT_MODE,
+    request_mode: str = DEFAULT_MODE, auto_compress: bool = True,
 ) -> dict[str, Any]:
     output_path = Path(task["output"])
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -177,6 +177,7 @@ def run_single_task(
                 model=task.get("model"),
                 config_path=config_path,
                 mode=request_mode,
+                auto_compress=auto_compress,
                 verbose=False,
             )
             file_size = os.path.getsize(result_path)
@@ -217,6 +218,7 @@ def run_stage(
     max_workers: int,
     config_path: str | None,
     request_mode: str = DEFAULT_MODE,
+    auto_compress: bool = True,
 ) -> list[dict[str, Any]]:
     if not indexed_tasks:
         return []
@@ -226,7 +228,7 @@ def run_stage(
     results: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=worker_count) as pool:
         futures = {
-            pool.submit(run_single_task, task, index, total, config_path, request_mode): index
+            pool.submit(run_single_task, task, index, total, config_path, request_mode, auto_compress): index
             for index, task in indexed_tasks
         }
         for future in as_completed(futures):
@@ -236,14 +238,14 @@ def run_stage(
 
 def batch_generate(
     tasks: list[dict[str, Any]], max_workers: int = DEFAULT_WORKERS, config_path: str | None = None,
-    request_mode: str = DEFAULT_MODE,
+    request_mode: str = DEFAULT_MODE, auto_compress: bool = True,
 ) -> list[dict[str, Any]]:
     if max_workers <= 0:
         raise RuntimeError("workers 必须大于 0")
     total = len(tasks)
     stage1, stage2 = split_tasks_by_dependency(tasks)
 
-    stage1_results = run_stage("阶段一 文生图", stage1, total, max_workers, config_path, request_mode)
+    stage1_results = run_stage("阶段一 文生图", stage1, total, max_workers, config_path, request_mode, auto_compress)
     if any(not result["success"] for result in stage1_results):
         print("\n阶段一有失败任务,跳过依赖 ref 的阶段二。")
         stage2_results = [
@@ -259,7 +261,7 @@ def batch_generate(
         ]
     elif stage2:
         validate_refs(stage2)
-        stage2_results = run_stage("阶段二 图生图", stage2, total, max_workers, config_path, request_mode)
+        stage2_results = run_stage("阶段二 图生图", stage2, total, max_workers, config_path, request_mode, auto_compress)
     else:
         stage2_results = []
 
@@ -280,6 +282,10 @@ def parse_args() -> argparse.Namespace:
         "--mode", choices=SUPPORTED_MODES, default=DEFAULT_MODE,
         help="请求方式: auto(默认,按请求大小自动选)、sync(同步等待)、async(异步提交后轮询)",
     )
+    parser.add_argument(
+        "--no-compress", action="store_true",
+        help="关闭上传前自动压缩(默认开启): 超过阈值的参考图会转为 JPEG 再上传",
+    )
     parser.add_argument("--validate-only", action="store_true", help="只校验 tasks.json,不调用图片接口")
     return parser.parse_args()
 
@@ -297,7 +303,10 @@ def main() -> int:
             print(f"tasks.json 校验通过: {len(tasks)} 个任务")
             return 0
 
-        results = batch_generate(tasks, max_workers=args.workers, config_path=args.config, request_mode=args.mode)
+        results = batch_generate(
+            tasks, max_workers=args.workers, config_path=args.config,
+            request_mode=args.mode, auto_compress=not args.no_compress,
+        )
         if args.result:
             result_path = Path(args.result).expanduser().resolve()
             result_path.parent.mkdir(parents=True, exist_ok=True)
