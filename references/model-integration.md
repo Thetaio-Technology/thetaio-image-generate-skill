@@ -125,9 +125,12 @@ python <技能目录>/scripts/generate_image.py \
   --mode async
 ```
 
+> `--image` 可重复传入,但**单次请求上限 15 张**(ThetaIO 自定义上限); 超过会直接报错,请拆分成多个任务。
+> **不建议贴上限使用**: 一般 **6~8 张参考图就足够**,张数越多出图越慢、也越容易触发上游风控。
+
 ## 批量生图
 
-优先使用 `scripts/batch_generate.py`(默认 `--mode auto`,同样可按需传 `sync`/`async`):
+优先使用 `scripts/batch_generate.py`(默认 `--mode auto`,同样可按需传 `sync`/`async`)。支持并发,且**每个任务可携带多张参考图**:
 
 ```bash
 python <技能目录>/scripts/batch_generate.py \
@@ -167,7 +170,8 @@ python <技能目录>/scripts/compress_image.py \
 
 - `size`: 默认 `2K`,可选 `1K`、`2K`、`4K`
 - `model`: 可选,默认 `gpt-image-2`;可用 `gpt-image-2`、`gpt-image-2.5`,或自带服务商对应的模型名
-- `ref`: 参考图路径; 存在时走图生图
+- `ref`: 单张参考图路径(旧字段); 存在时走图生图
+- `refs`: 参考图路径数组,单次请求一次携带,**最多 15 张**(ThetaIO 自定义上限,一般 6~8 张足够); 与 `ref` 同时出现时以 `refs` 为准
 - `negative_prompt`: 会追加到提示词末尾,因为多数 OpenAI 兼容图片接口不支持单独的负向参数
 
 ## 失败处理

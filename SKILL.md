@@ -217,7 +217,7 @@ python <技能目录>/scripts/generate_image.py \
   --size 2K
 ```
 
-多参考图图生图(默认 auto 会自动走异步; 也可显式指定):
+多参考图图生图(默认 auto 会自动走异步,也可显式指定):
 
 ```bash
 python <技能目录>/scripts/generate_image.py \
@@ -227,6 +227,9 @@ python <技能目录>/scripts/generate_image.py \
   --size 2K \
   --mode async
 ```
+
+> `--image` 可重复传入,**单次请求上限 15 张**(ThetaIO 自定义上限); 超过会直接报错,请拆分为多个任务。
+> **不建议贴上限使用**: 一般 **6~8 张参考图就足够**(也很常见),参考图越多出图越慢、也更容易触发上游风控。
 
 局部编辑(透明 PNG 蒙版,透明像素标记可编辑区域):
 
@@ -238,7 +241,7 @@ python <技能目录>/scripts/generate_image.py \
   --output "<输出目录>/raw/01.png"
 ```
 
-批量生图(默认 `--mode auto`,多参考图/大请求自动走异步):
+批量生图(默认 `--mode auto`,多参考图/大请求自动走异步; 支持并发 + 多参考图):
 
 ```bash
 python <技能目录>/scripts/batch_generate.py \
@@ -246,6 +249,8 @@ python <技能目录>/scripts/batch_generate.py \
   --workers 2 \
   --result "<输出目录>/batch_result.json"
 ```
+
+> 每个任务可用 `ref`(单张)或 `refs`(数组,最多 15 张)携带参考图; 并发执行时每个任务各带各的参考图集合。
 
 生成后压缩:
 
@@ -272,21 +277,30 @@ python <技能目录>/scripts/compress_image.py \
     "output": "raw/02.png",
     "ref": "raw/01.png",
     "size": "2K"
+  },
+  {
+    "prompt_file": "prompts/03.md",
+    "output": "raw/03.png",
+    "refs": ["raw/01.png", "raw/02.png"],
+    "size": "2K"
   }
 ]
 ```
 
 - 必填: `output`,以及 `prompt` 或 `prompt_file` 二选一。
-- 可选: `size`(1K/2K/4K,默认 2K)、`model`、`ref`(存在时走图生图)、`negative_prompt`(追加到提示词末尾)。
+- 可选: `size`(1K/2K/4K,默认 2K)、`model`、`negative_prompt`(追加到提示词末尾)。
+- 参考图: `ref`(单张,旧字段)或 `refs`(数组)。**单次请求最多 15 张**(ThetaIO 自定义上限),超过直接报错; **一般 6~8 张就足够**。以 `refs` 为准。
 - 路径可写绝对路径,也可写相对 `tasks.json` 所在目录的路径。
-- 批量默认两阶段: 无 `ref` 的任务先生成作为视觉锚,带 `ref` 的任务再基于锚图生成,保证同组风格一致。
+- 批量默认两阶段: 无参考图的任务先生成作为视觉锚,带参考图的任务再基于锚图生成,保证同组风格一致。
 
 ## 硬性规则
 
 - 不要编造用户没有提供的事实性文字。图片内文字要短,并且能从用户需求确认。
 - 提示词必须明确主体、构图、色彩、渲染风格、光线、画幅比例、分辨率档位和限制。
 - 批量图片默认保持同一套风格系统,除非用户明确要求多风格探索。
-- 使用参考图作为风格锚点时,必须在 `tasks.json` 里设置 `ref`; 不要静默改成文生图。
+- 使用参考图作为风格锚点时,必须在 `tasks.json` 里设置 `ref`/`refs`; 不要静默改成文生图。
+- **单次请求最多 15 张参考图**(ThetaIO 自定义上限); 超过时拆成多个任务,不要强行合并成一次请求。
+- **不建议贴上限使用**: 一般 6~8 张参考图就已足够; 张数越多出图越慢,也越容易触发上游风控。
 - 小红书图必须读取 `references/xiaohongshu-styles.md`,并明确画幅、安全区、版式密度、字体层级和装饰策略。
 - 默认不要自动压缩。只有用户明确要求压缩、发布包、上传前处理或转格式时,才执行 `scripts/compress_image.py`。
 - 后处理不得覆盖 `raw/` 原图。压缩图必须输出到 `compressed/` 或用户指定目录,除非用户显式要求覆盖。

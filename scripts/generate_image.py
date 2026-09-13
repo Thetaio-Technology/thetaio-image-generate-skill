@@ -35,6 +35,12 @@ MODE_ASYNC = "async"
 MODE_AUTO = "auto"
 DEFAULT_MODE = MODE_AUTO
 SUPPORTED_MODES = (MODE_AUTO, MODE_SYNC, MODE_ASYNC)
+# 单次请求最多携带的参考图数量（含 mask 之外的输入图）。超过则直接报错。
+#
+# 注意：15 是 ThetaIO 自己设定的上限，不是模型能力上限。实际上一般 6~8 张
+# 参考图就已经很多了；超过太多既拖慢出图（张数越多耗时越长），也更容易触发
+# 上游风控。除非确有必要，不要贴着 15 张用。
+MAX_REFERENCE_IMAGES = 15
 # auto 模式下判定为“重请求”的阈值: 多个参考图 / 总字节数偏大 / 多张输出 / 4K。
 AUTO_ASYNC_IMAGE_COUNT = 2
 AUTO_ASYNC_TOTAL_BYTES = 4 * 1024 * 1024
@@ -317,11 +323,18 @@ def generate_image(
     if n < 1:
         raise RuntimeError("--n 必须至少为 1")
     image_paths = [str(path) for path in images] if images else None
+    if image_paths and len(image_paths) > MAX_REFERENCE_IMAGES:
+        raise RuntimeError(
+            f"单次请求最多支持 {MAX_REFERENCE_IMAGES} 张参考图（ThetaIO 自定义上限），当前 {len(image_paths)} 张；"
+            f"一般 6~8 张就足够了，请减少参考图或拆分为多个任务"
+        )
 
     if verbose:
         kind = "图生图" if image_paths else "文生图"
         print(f"模式: {kind}")
         print(f"尺寸: {normalize_size(size)}")
+        if image_paths:
+            print(f"参考图: {len(image_paths)} 张")
 
     result, model_id = request_image(
         prompt_text, model, size, quality, n, response_format, image_paths, mask,

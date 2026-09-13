@@ -13,11 +13,20 @@ ThetaIO 图片生成器技能的批量生图脚本。
     "output": "output/raw/02.png",
     "ref": "output/raw/01.png",
     "size": "2K"
+  },
+  {
+    "prompt_file": "output/prompts/03.md",
+    "output": "output/raw/03.png",
+    "refs": ["output/raw/01.png", "output/raw/02.png"],
+    "size": "2K"
   }
 ]
 
-支持两阶段执行: 无 ref 的任务先并发生成作为视觉锚,带 ref 的任务再基于锚图
-并发生成,保证同一组图片风格一致。
+- `ref`: 单张参考图(旧字段,继续支持)。
+- `refs`: 多张参考图数组,单次请求一次携带,最多 15 张。与 `ref` 同时出现时以 `refs` 为准。
+
+支持两阶段执行: 无参考图的任务先并发生成作为视觉锚,有参考图的任务再基于锚图
+并发生成,保证同一组图片风格一致。并发时每个任务各自携带自己的参考图集合。
 """
 
 from __future__ import annotations
@@ -34,6 +43,7 @@ from typing import Any
 from generate_image import (
     DEFAULT_MODE,
     DEFAULT_SIZE,
+    MAX_REFERENCE_IMAGES,
     SUPPORTED_MODES,
     generate_image,
     normalize_size,
@@ -85,9 +95,32 @@ def normalize_task(task: dict[str, Any], base_dir: Path) -> dict[str, Any]:
     normalized["size"] = normalize_size(str(task.get("size") or DEFAULT_SIZE))
     if task.get("model"):
         normalized["model"] = str(task["model"])
-    if task.get("ref"):
-        normalized["ref"] = str(resolve_path(task["ref"], base_dir))
+    refs = resolve_refs(task, base_dir)
+    if refs:
+        normalized["refs"] = refs
     return normalized
+
+
+def resolve_refs(task: dict[str, Any], base_dir: Path) -> list[str]:
+    """解析任务的参考图: 优先 refs(数组),否则回退单张 ref。最多 15 张。"""
+    raw = task.get("refs")
+    if raw is None:
+        raw = task.get("ref")
+    if raw is None:
+        return []
+    if isinstance(raw, (str, Path)):
+        refs = [str(raw)]
+    elif isinstance(raw, list):
+        refs = [str(item) for item in raw]
+    else:
+        raise RuntimeError("ref/refs 必须是路径字符串或路径数组")
+    refs = [str(resolve_path(item, base_dir)) for item in refs if str(item).strip()]
+    if len(refs) > MAX_REFERENCE_IMAGES:
+        raise RuntimeError(
+            f"单次请求最多支持 {MAX_REFERENCE_IMAGES} 张参考图（ThetaIO 自定义上限），"
+            f"任务 output={task.get('output')} 携带了 {len(refs)} 张；一般 6~8 张就足够了"
+        )
+    return refs
 
 
 def load_tasks(tasks_file: Path) -> list[dict[str, Any]]:
@@ -103,19 +136,24 @@ def split_tasks_by_dependency(
     stage1: list[tuple[int, dict[str, Any]]] = []
     stage2: list[tuple[int, dict[str, Any]]] = []
     for index, task in enumerate(tasks):
-        if task.get("ref"):
+        if task.get("refs"):
             stage2.append((index, task))
         else:
             stage1.append((index, task))
     if not stage1:
-        raise RuntimeError("至少需要一个无 ref 的文生图任务作为视觉锚")
+        raise RuntimeError("至少需要一个无参考图的文生图任务作为视觉锚")
     return stage1, stage2
 
 
 def validate_refs(stage2: list[tuple[int, dict[str, Any]]]) -> None:
-    missing_refs = [task["ref"] for _, task in stage2 if not Path(task["ref"]).exists()]
+    missing_refs = [
+        ref
+        for _, task in stage2
+        for ref in task.get("refs", [])
+        if not Path(ref).exists()
+    ]
     if missing_refs:
-        raise RuntimeError(f"阶段二 ref 图未生成,无法继续: {missing_refs}")
+        raise RuntimeError(f"阶段二参考图未生成,无法继续: {missing_refs}")
 
 
 def run_single_task(
@@ -124,8 +162,8 @@ def run_single_task(
 ) -> dict[str, Any]:
     output_path = Path(task["output"])
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    ref_path = task.get("ref")
-    mode = "img2img" if ref_path else "text2img"
+    refs = task.get("refs") or []
+    mode = "img2img" if refs else "text2img"
     display_name = output_path.name
 
     last_error = None
@@ -133,7 +171,7 @@ def run_single_task(
         try:
             result_path = generate_image(
                 prompt=task["prompt"],
-                images=[ref_path] if ref_path else None,
+                images=refs if refs else None,
                 output=output_path,
                 size=task["size"],
                 model=task.get("model"),
